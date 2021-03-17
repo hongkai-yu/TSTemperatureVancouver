@@ -1,0 +1,238 @@
+---
+title: "A Time Series Analysis of the Temperature in Vancouver: Correlation and Forecast"
+authors: "L2E: Hongkai Yu 90316894, Joyce Li  27483163, Ke Miao 90130048, Ziqi Su 53642161"
+date: "3/16/2021"
+header-includes:
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+  - \usepackage{bbm}
+output: 
+  pdf_document:
+    fig_caption: yes
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=TRUE, cache = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages('kableExtra')
+#install.packages("dplyr")
+#install.packages('zoo')
+#install.packages("tseries")
+library(tidyverse)
+library(zoo)
+library(tseries)
+library(kableExtra)
+```
+
+# I. Introduction
+
+Weather conditions are highly influencial to social and personal activities. Effective temperature prediction can help with decision making and resource allocation. This study tries to perform a time series analysis to investigate behaviours of the temperature in Vancouver, using historical weather data of Vancouver, Canada from 2012 to 2019. 
+
+## 1.1 Motivation and the Theme Question
+
+In daily life, we can observe that the temperature today is often correlated with the temperature tomorrow, e.g. if today is a cold today, it is very likely that tomorrow also is, so we start to wonder if there is a connection between the historical temperature data and the future. However, it could also be that the "correlation" is purely due to the seasonal factors in the climate, e.g. since "today" and "tomorrow" are both in winter, they would surely be cold. Hence, we can roughly divide this observed correlation into two parts: seasonal effect, and the correlation between the deseasonal historical and deseasonal future data. In this study, we aim to investigate whether the later effect is significant. Further, we intend to evaluate whether we can use the historical temperature to better forecast future temperature.
+
+## 1.2 Data Collection and Cleaning
+
+The data was provided by [\underline{\textcolor{blue}{"Climate Canada"}}](https://climate.weather.gc.ca/) and recorded at the station: "VANCOUVER HARBOUR CS". 
+The dataset contains several meteorological measurements including daily maximum, minimum, and mean temperature and their related property flags, daily maximum, minimum, and mean precipitation and their related proeprty flags, as well as many other weather variables. After data cleansing and wrangling, **Date** and **Mean Temperature** between **January 1st, 2012** and **December 31st, 2019** inclusive were kept for further analysis. Moreover, to keep number of days in each year consistent thereby to facilitate periodical analysis, we deleted the two extra days from two leap years, which are 2012-2-29 and 2016-2-29.
+
+```{r cache = FALSE, echo = FALSE}
+climate_sub <- read.csv("climate.csv", header=TRUE)%>%select(Date.Time, Mean.Temp)%>%mutate(Date.Time=as.Date(Date.Time))%>%filter(between(Date.Time, as.Date("2012-01-01"), as.Date("2019-12-31")), Date.Time != as.Date('2012-02-29'),Date.Time != as.Date('2016-02-29'))
+```
+
+The dataset comprises records with missing mean temperature values. 
+The R built-in function "na.fill" in package "zoo" is used to interpolate and fill out the missing values
+```{r cache = FALSE, echo = FALSE}
+num_rec_date_na<-which(is.na(climate_sub$Date.Time))
+num_rec_temp_na<-which(is.na(climate_sub$Mean.Temp))
+cat("Initial number of records with NA dates: ", toString(length(num_rec_date_na)), "\n")
+cat("Initial number of records with NA temperatures: ", toString(length(num_rec_temp_na)), "\n")
+```
+
+After interpolation, the dataset has following properties
+```{r cache = FALSE, echo = FALSE}
+temp <- na.fill(climate_sub$Mean.Temp,"extend") 
+
+max_mean_temp<-max(temp)
+min_mean_temp<-min(temp)
+
+main_var_tbl <- data.frame(
+  Variable = c("Date", "Mean Temperature"),
+  Type = c("discrete Series", "numerical"),
+  Unit = c("date", "celcius"),
+  Range = c("[2012-01-01, 2019-12-31]", paste("[",min_mean_temp,",",max_mean_temp,"]"))
+)
+
+kable(main_var_tbl, booktabs=T, caption = "Summary of Data Set") %>%
+  kable_styling(latex_options = c("scale_down", "HOLD_position"))
+```
+
+Table 1. gives a brief summary of variables we selected. 
+
+The dataset is split into training set and test set. The first seven years from 2012 to 2017 inclusive is used for training the time series model. The last one year 2018 is used to test the performance of the model.
+
+```{r cache = FALSE, echo = FALSE}
+temp.ts <- ts(temp, frequency = 365,start = c(2012,1,1))
+train <- 1:(365*7)
+temp.train <- ts(temp[train], frequency = 365,start = c(2012,1,1))
+temp.test <- ts(temp[-train], frequency = 365,start = c(2019,1,1))
+```
+
+# II. Analysis
+
+## 2.1 Preliminary Analysis and Correlation
+
+Below is the plot of the training set
+```{r echo=FALSE}
+temp.de <- decompose(temp.train) 
+```
+```{r}
+plot(temp.de)
+```
+Figure 1. shows there is a strong seasonal pattern within the data and the time series is non-stationary. We deseasonalized the data and used the adf function to test the stationarity of the time series.
+
+```{r echo=FALSE}
+options(repr.plot.width=10, repr.plot.height=5)
+temp.sea <- temp.de$seasonal
+seasonal <- temp.sea[1:365]
+temp.desea <- temp.train - temp.sea
+adf.test(temp.desea)
+```
+
+```{r}
+plot(temp.desea)
+```
+After deseasonalization, Figure 2. shows no trend and seems to become stationary. 
+And the P-value of Augmented Dickey-Fuller test, 0.01 is less than 0.05, thus also indicate that the deseasonalized time series is stationary.  
+
+Acf, pacf, and Periodogram of the stationary time series are generated and exhibited blow.
+
+```{r echo=FALSE}
+acf(temp.desea, lag = 50)
+```
+```{r echo=FALSE}
+pacf(temp.desea)
+```
+```{r echo=FALSE}
+spec.pgram(temp.desea, spans = 2*sqrt(length(temp.desea)))
+```
+From Figure 3., It is noticeable that acf shows a sine waved pattern and tails off. Pacf is positively significant at lag=1. Periodogram is dominated by low frequencies and shows no "hidden" period. Now, the first part of our theme question can be answered: indeed, there is still a positive correlation between consecutive deseasonal data aside from the seasonal effect, e.g. the correlation between "today is cold"" and "tomorrow is cold"" is not **only** because of the seasonal effect.
+
+
+## 2.2 Forecasting
+Knowing that there is indeed a correlation between the consecutive data, we move to investigate whether past data, aside from determine seasonal effect, can be useful in forecasting. To see this, we try to forecast temperatures in two ways: using only the seasonal effect, and use both the seasonal effect and our ARMA model for deseasonal data. If the later method is significantly better, we can conclude that historical data is useful in improving the forecasting results.
+
+### 2.2.1 Model Construction
+
+We aim to build a forecasting model based on the Box-Jenkins approach. ARMA model is chosen to be apllied according to the features of the data. ML and Grid-search is used to find the best-fit model which has the minimum AIC.
+
+**Notice to grader: the code below take minites to run because of the ML convergence problem. Alternatively, you can just read the result from a pre-compuated csv file using the last line.**
+```{r echo=FALSE}
+temp.desea.aic <- matrix(0,7,7)
+# for (p in 0:6) for (q in 0:6) {
+#     temp.desea.aic[p+1,q+1] <- arima(temp.desea, order = c(p, 0, q))$aic
+# }
+
+temp.desea.aic <- as.matrix(read.csv("temp.desea.aic.csv", header=T,row.names = 1)) # Alternatively, use this
+
+min(temp.desea.aic)
+arma55 <- arima(temp.desea, order = c(5, 0, 5))
+temp.desea.aic
+
+```
+Since p=5 q=5 have minimum AIC, ARMA(5,5) is the best-fit ARMA model
+```{r cache = FALSE, echo = FALSE}
+Box.test(arma55$residuals)
+```
+
+```{r cache = FALSE, echo = FALSE}
+tsdiag(arma55)
+```
+The above model diagnostics suggest that our model is appropriate.
+
+### 2.2.2 Forecast Temperature in One Year
+
+In this section we aim to compare the forecasting results in the long term, or, in scope of one year.
+Below we see the difference in prediction using purely the seasonal effect and prediction using both seasonal effect and ARMA model.
+
+Seasonal + ARMA
+```{r cache = FALSE, echo = FALSE}
+temp.pred.full <- seasonal + predict(arma55, 365)$pred
+```
+
+
+Pure Seasonal Effect
+```{r cache = FALSE, echo = FALSE}
+temp.mean <- arima(temp.desea, order = c(0, 0, 0))
+temp.pred.sea <- seasonal + predict(temp.mean,365)$pred
+```
+
+
+Comparison
+```{r cache = FALSE, echo = FALSE}
+options(repr.plot.width=8, repr.plot.height=6)
+plot(temp.test)
+lines(temp.pred.full,col = 'blue')
+lines(temp.pred.sea,col = 'red')
+```
+Since the blue and red line looks extremely close. The two forecasts converge very quickly and there is no significant difference in the long term. Therefore, we conclude that at least for long term, historical data won't really improve the forecasting results. This is actually intuitively appealing, since knowing the weather today won't really help me to predict the weather two month from now. In the long term, seasonal effects dominate.
+
+
+### 2.2.3 Forecast Temperature in One Day
+
+Now we narrow our scope to the forecast to just one day in the future (super short term) and try to see whether the historical data would be useful in short term prediction.
+
+Seasonal + ARMA
+
+The code below does the following: at first, we know the historical data of 7 years and constructing an ARMA model, trying to using it, together with the seasonal effect, to predict the first day's temperature. Then, we "proceed" to the next day and construct a new ARMA model incorporating the new information (the temperature that day), and try to predict the temperature of the day after that. We repeat the process, constructing 365 ARMA models and made 365 one-day predictions. For each predictions, we calculate the relative error of it.
+
+**Notice to grader: the code below would potentially take up to half an hour to run due to the computation complexity and ML convergence problem. Alternatively, you can just read the result from a pre-compuated csv file using the last line.**
+```{r cache = FALSE, echo = FALSE}
+seasonal <- decompose(temp.ts)$seasonal
+temp.desea <- temp.ts - seasonal
+
+seasonal <- decompose(temp.ts)$seasonal
+temp.desea <- temp.ts - seasonal 
+error1 <- vector()
+# for (i in (365*7):(365*8-1)) {
+#    train <- 1:i
+#    temp.train <- ts(temp.desea[train], frequency = 365,start = c(2012,1,1))
+#    test <- temp[i+1]
+# 
+#    arma55 <- arima(temp.train, order = c(5, 0, 5))
+#    pred <- predict(arma55, 1)$pred + seasonal[i+1]
+# 
+#    error1[i-(365*7)+1] <- (pred - test) #/test
+# }
+
+# error1 <- read.csv("error1.csv", header=T)$x # alternatively run this
+error1 <- read.csv("predMinTest.csv", header=T)$x # alternatively run this
+
+# write_csv(error1, 'predMinTest.csv')
+
+```
+
+Pure Seasonal Effect
+```{r cache = FALSE, echo = FALSE}
+mean <- mean(temp.ts)
+error2 <- vector()
+for (i in (365*7):(365*8-1)) {
+  test <- temp[i+1]
+  pred <- seasonal[i+1] + mean
+  error2[i-(365*7)+1] <- (pred - test) #/test
+}
+```
+
+Comparison
+```{r cache = FALSE, echo = FALSE}
+plot((error1)^2,type = 'l', col = 'red') 
+lines((error2)^2,type = 'l') 
+summary((error1)^2)
+summary((error2)^2)
+```
+Since the red line is lower than the black one, the method using seasonal effect combined with ARMA model has smaller errors and thus a better method. There is a large difference in Mean errors of two methods (1.85 vs 5.81), while the difference in Median errors is smaller (0.92 vs 1.82). This suggests that the first model perform better mostly because it can deal with the acyclical, abnormal temperatures better. This result is intuitively appealing, since it essentially shows that when the temperature behaves in accordance with the seasonal effect (pure seasonal effect can give a good result), historical data won't matter that much. However, if the temperature behaves weirdly, e.g. cold whether in the summer, the historical data approach can be more flexible and better at grasping the abnormality thus perform better.
+
+# III. Conclusion
+This study used a time series analysis approch to study the correlation and forecast methods regarding the temperature in Vancouver based on the meteorological data from 2012 to 2019. The results revealed that there is a positive correlation between consecutive data aside from the seasonal effect. Regarding the prediction power of the deseasonal historical data, we find that it doesn't matter that much when it comes to long term. However, in the short term, due to its flexibility it can greatly enhance the accuracy of the prediction. These findings show that a time-series focus on the deseasonal historical may have the potential in providing more accurate predictions of the weather in the short term. These findings could be helpful to support decisions regarding personal schedules, business management, allocation of medical resources, and other matters. 
